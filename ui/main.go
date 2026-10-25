@@ -44,7 +44,7 @@ func main() {
 		// A fixed size makes tiling window managers (Hyprland, sway) open it floating, like a dialog;
 		// Brasa centres floating windows
 		Width:            560,
-		Height:           990,
+		Height:           1010,
 		DisableResize:    true,
 		BackgroundColour: &options.RGBA{R: 0, G: 4, B: 15, A: 255},
 		AssetServer:      &assetserver.Options{Assets: assets},

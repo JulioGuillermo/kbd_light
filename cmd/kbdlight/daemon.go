@@ -31,10 +31,11 @@ type daemon struct {
 	cfg        light.Config
 	value      int // last intensity written, -1 before the first write
 	lastKey    time.Time
-	cpu        float64   // processor load, 0-1, smoothed
-	batteryLow bool      // at or below the alert level and not charging
-	lowSince   time.Time // when the battery went low (the alert's pulses count from here)
-	flashAt    time.Time // last notification flash
+	cpu        float64    // processor load, 0-1, smoothed
+	batteryLow bool       // at or below the alert level and not charging
+	lowSince   time.Time  // when the battery went low (the alert's pulses count from here)
+	flashAt    time.Time  // last notification flash
+	changed    *sync.Cond // signalled (on mu) when the configuration changes, for the watchers
 
 	wake chan struct{} // configuration changed
 	keys chan struct{} // a key was pressed
@@ -99,7 +100,7 @@ func (d *daemon) run() {
 			x := math.Max(bump(t, 0.12, 0.05), bump(t, 0.36, 0.05))
 			v = int(math.Round(255 * x))
 			if t < 0.6 {
-				next = frame
+				next = cfg.Frame()
 			} else {
 				next = time.Duration((cfg.BatteryEvery - t) * 1e9)
 			}
@@ -108,7 +109,7 @@ func (d *daemon) run() {
 		if since := now.Sub(flashAt).Seconds(); since < 0.6 {
 			x := math.Max(bump(since, 0.08, 0.06), bump(since, 0.34, 0.06))
 			v = max(v, int(math.Round(255*x)))
-			next = frame
+			next = cfg.Frame()
 		}
 
 		if err := d.write(v, force); err != nil {
@@ -135,14 +136,29 @@ func (d *daemon) run() {
 	}
 }
 
-const frame = 33 * time.Millisecond
-
 func bump(t, c, w float64) float64 { x := (t - c) / w; return math.Exp(-x * x) }
 
-// watchCPU keeps a smoothed processor load for the cpu mode (from /proc/stat, twice a second).
+// waitFor blocks, without waking up, until the configuration makes need() true.
+func (d *daemon) waitFor(need func(light.Config) bool) {
+	d.mu.Lock()
+	for !need(d.cfg) {
+		d.changed.Wait()
+	}
+	d.mu.Unlock()
+}
+
+// watchCPU keeps a smoothed processor load for the cpu mode (from /proc/stat, twice a second), and
+// sleeps while another mode is on.
 func (d *daemon) watchCPU() {
 	var lastIdle, lastTotal uint64
 	for {
+		if d.mu.Lock(); d.cfg.Mode != "cpu" {
+			d.mu.Unlock()
+			d.waitFor(func(c light.Config) bool { return c.Mode == "cpu" })
+			lastTotal = 0 // a fresh start: the old sample is stale
+		} else {
+			d.mu.Unlock()
+		}
 		if data, err := os.ReadFile("/proc/stat"); err == nil {
 			f := strings.Fields(strings.SplitN(string(data), "\n", 2)[0]) // "cpu user nice system idle iowait ..."
 			var total, idle uint64
@@ -165,9 +181,11 @@ func (d *daemon) watchCPU() {
 	}
 }
 
-// watchBattery checks every 20 s whether the battery is at or below the alert level and discharging.
+// watchBattery checks every 20 s whether the battery is at or below the alert level and discharging,
+// and sleeps while the alert is off.
 func (d *daemon) watchBattery() {
 	for {
+		d.waitFor(func(c light.Config) bool { return c.BatteryAlert })
 		low := false
 		d.mu.Lock()
 		level := d.cfg.BatteryLevel
@@ -320,6 +338,7 @@ func (d *daemon) handle(conn net.Conn) {
 			d.mu.Unlock()
 			d.save(c)
 			d.poke()
+			d.changed.Broadcast()
 		}
 	} else if req.Cmd == "flash" || req.Cmd == "notification" {
 		// "notification" comes from notify-watch and only counts when the alert is on; "flash" always
@@ -343,6 +362,7 @@ func runDaemon(socket, statePath, method, group string) error {
 		return errors.New("the daemon needs root (it writes to the firmware through acpi_call)")
 	}
 	d := &daemon{method: method, statePath: statePath, value: -1, wake: make(chan struct{}, 1), keys: make(chan struct{}, 1)}
+	d.changed = sync.NewCond(&d.mu)
 	if err := d.probe(); err != nil {
 		return err
 	}

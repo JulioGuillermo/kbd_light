@@ -41,7 +41,7 @@ func TestModesStayInRange(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	for _, mode := range Modes {
 		c := base
-		c.Mode = mode
+		c.Mode, c.FPS = mode, 5+len(mode)*5 // different rates
 		c, _ = c.Clamp()
 		for i := 0; i < 400; i++ {
 			at := now.Add(time.Duration(i) * 37 * time.Millisecond)

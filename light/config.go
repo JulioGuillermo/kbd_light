@@ -22,6 +22,7 @@ type Config struct {
 	BPM    float64 `json:"bpm"`     // heartbeat: beats per minute
 	Flick  float64 `json:"flicker"` // candle: how much the flame moves, 0-1
 	Curve  []Node  `json:"curve"`   // custom: the shape over one period, x and y in 0-1
+	FPS    int     `json:"fps"`     // animation updates per second (each one runs the firmware method)
 
 	// Alerts, on top of any mode
 	Notify       bool    `json:"notify"`        // flash on desktop notifications (kbdlight notify-watch)
@@ -52,7 +53,7 @@ func DefaultCurve() []Node {
 
 func DefaultConfig() Config {
 	return Config{Mode: "off", Level: 128, Min: 0, Max: 200, Period: 3, Hold: 1, Fade: 4, BPM: 60, Flick: 0.35,
-		Curve: DefaultCurve(), BatteryLevel: 20, BatteryEvery: 10}
+		Curve: DefaultCurve(), FPS: 15, BatteryLevel: 20, BatteryEvery: 10}
 }
 
 // Clamp keeps every field in range, so the daemon never writes an odd value to the controller.
@@ -76,6 +77,10 @@ func (c Config) Clamp() (Config, error) {
 	c.BatteryLevel = clampInt(c.BatteryLevel, 1, 99)
 	c.BatteryEvery = ClampFloat(c.BatteryEvery, 2, 300)
 	c.Curve = clampCurve(c.Curve)
+	if c.FPS == 0 {
+		c.FPS = 15 // saved by a version without the setting
+	}
+	c.FPS = clampInt(c.FPS, 5, 60)
 	return c, nil
 }
 
@@ -139,10 +144,19 @@ type State struct {
 	CPU     float64 // 0-1
 }
 
-// At returns the intensity for this moment and how long it stays valid: animations ask again
-// ~30 times a second, steady states only to re-assert it now and then.
+// Frame is the time between two animation updates.
+func (c Config) Frame() time.Duration {
+	if c.FPS <= 0 {
+		return time.Second / 15
+	}
+	return time.Second / time.Duration(c.FPS)
+}
+
+// At returns the intensity for this moment and how long it stays valid: animations ask again FPS
+// times a second, steady states only to re-assert it now and then.
 func (c Config) At(now time.Time, s State) (int, time.Duration) {
-	const frame, steady = 33 * time.Millisecond, 5 * time.Second
+	const steady = 30 * time.Second // re-assert a steady light now and then (after a resume, the Fn key)
+	frame := c.Frame()
 	span := float64(c.Max - c.Min)
 	secs := float64(now.UnixNano()) / 1e9
 	switch c.Mode {
@@ -176,7 +190,7 @@ func (c Config) At(now time.Time, s State) (int, time.Duration) {
 		w := (math.Sin(secs*2.3) + 0.6*math.Sin(secs*5.7+1) + 0.35*math.Sin(secs*11.3+2)) / 1.95
 		return clampInt(round(float64(c.Level)*(1-c.Flick*(0.5-0.5*w))), 0, 255), frame
 	case "cpu":
-		return c.Min + round(span*s.CPU), 100 * time.Millisecond
+		return c.Min + round(span*s.CPU), max(frame, 100*time.Millisecond) // the load is read twice a second
 	case "custom":
 		return c.Min + round(span*CurveAt(c.Curve, math.Mod(secs, c.Period)/c.Period)), frame
 	}

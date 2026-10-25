@@ -18,6 +18,7 @@
 //	kbdlight notify on|off                              flash on desktop notifications
 //	kbdlight battery-alert on|off [--level 20] [--every 10s]
 //	kbdlight flash                                      one flash, to try it
+//	kbdlight fps N                                      animation updates per second, 5-60 (15)
 //	kbdlight-ui                                         the window
 //	kbdlight daemon [--group NAME] ...                  as root (kbdlight.service)
 //	kbdlight notify-watch                               as your user (kbdlight-notify.service)
@@ -140,6 +141,15 @@ func main() {
 			fs.Parse(args[1:])
 			c.BatteryAlert, c.BatteryEvery = args[0] == "on", every.Seconds()
 		})
+	case "fps":
+		if len(args) != 1 {
+			usage()
+		}
+		n, e := strconv.Atoi(args[0])
+		if e != nil {
+			fail(fmt.Errorf("fps: a number 5-60"))
+		}
+		err = change(func(c *light.Config) { c.FPS = n })
 	case "flash":
 		_, err = light.Call(light.Request{Cmd: "flash"})
 	case "notify-watch":
@@ -181,6 +191,7 @@ func usage() {
   kbdlight notify on|off                              flash on desktop notifications
   kbdlight battery-alert on|off [--level 20] [--every 10s]
   kbdlight flash                                      one flash, to try it
+  kbdlight fps N                                      animation updates per second, 5-60 (15)
   kbdlight-ui                                         the window
   kbdlight daemon [--group NAME] ...                  as root (kbdlight.service)
   kbdlight notify-watch                               as your user (kbdlight-notify.service)

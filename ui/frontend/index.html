@@ -54,7 +54,7 @@
 
   /* Bézier editor */
   .editor { background: var(--card2); border-radius: 10px; border: 1px solid var(--line); }
-  .editor svg { display: block; width: 100%; height: 130px; touch-action: none; }
+  .editor svg { display: block; width: 100%; height: 120px; touch-action: none; }
   .editor .grid { stroke: var(--line); stroke-width: 1; }
   .editor .curve { fill: none; stroke: var(--red); stroke-width: 3; }
   .editor .area { fill: rgba(255,0,0,.12); }
@@ -99,7 +99,7 @@
   <div class="card" id="params"></div>
 
   <div class="card">
-    <h2>Alerts · with any mode</h2>
+    <h2>With any mode</h2>
     <div class="switch">
       <span>Flash on notifications</span>
       <span style="display:flex; gap:10px; align-items:center">
@@ -112,9 +112,9 @@
       <label class="toggle"><input type="checkbox" id="battery"><span></span></label>
     </div>
     <div class="sublist" id="battery-params"></div>
+    <div id="general-params"></div>
   </div>
 
-  <footer>Kept after closing the window and after a reboot.</footer>
 
 <script>
   // Keyboard drawing: rows of key widths
@@ -141,6 +141,7 @@
                  fields: [['min', 'Bottom of the curve', 0, 255, 1, ''], ['max', 'Top of the curve', 0, 255, 1, ''], ['period', 'One cycle', 0.5, 20, 0.1, 's']],
                  editor: true },
   };
+  const GENERAL = [['fps', 'Animation updates per second', 5, 60, 1, '']];
   const BATTERY = [['battery_level', 'When the battery is at or below', 1, 60, 1, '%b'], ['battery_every', 'A double pulse every', 2, 60, 1, 's']];
 
   const App = () => window.go.main.App;
@@ -169,6 +170,7 @@
     document.getElementById('notify').checked = cfg.notify;
     document.getElementById('battery').checked = cfg.battery_alert;
     document.getElementById('battery-params').innerHTML = sliders(BATTERY);
+    document.getElementById('general-params').innerHTML = sliders(GENERAL);
     for (const r of document.querySelectorAll('#battery-params input')) r.disabled = !cfg.battery_alert;
     for (const r of document.querySelectorAll('input[type=range]')) { fill(r); hook(r); }
   }
