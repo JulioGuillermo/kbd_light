@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"kbdlight/light"
 	"log"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -26,10 +27,14 @@ type daemon struct {
 	method    string // the firmware method taking the intensity as its last argument
 	statePath string
 
-	mu      sync.Mutex
-	cfg     light.Config
-	value   int // last intensity written, -1 before the first write
-	lastKey time.Time
+	mu         sync.Mutex
+	cfg        light.Config
+	value      int // last intensity written, -1 before the first write
+	lastKey    time.Time
+	cpu        float64   // processor load, 0-1, smoothed
+	batteryLow bool      // at or below the alert level and not charging
+	lowSince   time.Time // when the battery went low (the alert's pulses count from here)
+	flashAt    time.Time // last notification flash
 
 	wake chan struct{} // configuration changed
 	keys chan struct{} // a key was pressed
@@ -75,15 +80,37 @@ func (d *daemon) probe() error {
 }
 
 // run drives the light: work out the intensity, write it, then sleep until the next frame, a new
-// configuration or a key press, whichever comes first.
+// configuration, a key press or a flash, whichever comes first.
 func (d *daemon) run() {
 	timer := time.NewTimer(0)
 	force := true
 	for {
+		now := time.Now()
 		d.mu.Lock()
-		cfg, lastKey := d.cfg, d.lastKey
+		cfg, st := d.cfg, light.State{LastKey: d.lastKey, CPU: d.cpu}
+		low, lowSince, flashAt := d.batteryLow, d.lowSince, d.flashAt
 		d.mu.Unlock()
-		v, next := cfg.At(time.Now(), lastKey)
+		v, next := cfg.At(now, st)
+
+		// Low battery, on top of any mode: the light stays off and every few seconds gives a strong,
+		// quick double pulse
+		if cfg.BatteryAlert && low {
+			t := math.Mod(now.Sub(lowSince).Seconds(), cfg.BatteryEvery)
+			x := math.Max(bump(t, 0.12, 0.05), bump(t, 0.36, 0.05))
+			v = int(math.Round(255 * x))
+			if t < 0.6 {
+				next = frame
+			} else {
+				next = time.Duration((cfg.BatteryEvery - t) * 1e9)
+			}
+		}
+		// A notification: a quick double pulse to full, then back to whatever the mode shows
+		if since := now.Sub(flashAt).Seconds(); since < 0.6 {
+			x := math.Max(bump(since, 0.08, 0.06), bump(since, 0.34, 0.06))
+			v = max(v, int(math.Round(255*x)))
+			next = frame
+		}
+
 		if err := d.write(v, force); err != nil {
 			log.Printf("write %d: %v", v, err)
 		}
@@ -105,6 +132,77 @@ func (d *daemon) run() {
 			default:
 			}
 		}
+	}
+}
+
+const frame = 33 * time.Millisecond
+
+func bump(t, c, w float64) float64 { x := (t - c) / w; return math.Exp(-x * x) }
+
+// watchCPU keeps a smoothed processor load for the cpu mode (from /proc/stat, twice a second).
+func (d *daemon) watchCPU() {
+	var lastIdle, lastTotal uint64
+	for {
+		if data, err := os.ReadFile("/proc/stat"); err == nil {
+			f := strings.Fields(strings.SplitN(string(data), "\n", 2)[0]) // "cpu user nice system idle iowait ..."
+			var total, idle uint64
+			for i, v := range f[1:] {
+				n, _ := strconv.ParseUint(v, 10, 64)
+				total += n
+				if i == 3 || i == 4 {
+					idle += n
+				}
+			}
+			if lastTotal > 0 && total > lastTotal {
+				load := 1 - float64(idle-lastIdle)/float64(total-lastTotal)
+				d.mu.Lock()
+				d.cpu = 0.6*d.cpu + 0.4*load
+				d.mu.Unlock()
+			}
+			lastIdle, lastTotal = idle, total
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// watchBattery checks every 20 s whether the battery is at or below the alert level and discharging.
+func (d *daemon) watchBattery() {
+	for {
+		low := false
+		d.mu.Lock()
+		level := d.cfg.BatteryLevel
+		d.mu.Unlock()
+		for _, bat := range batteries() {
+			capText, _ := os.ReadFile(bat + "/capacity")
+			status, _ := os.ReadFile(bat + "/status")
+			capacity, err := strconv.Atoi(strings.TrimSpace(string(capText)))
+			if err == nil && capacity <= level && strings.TrimSpace(string(status)) == "Discharging" {
+				low = true
+			}
+		}
+		d.mu.Lock()
+		if low && !d.batteryLow {
+			d.lowSince = time.Now()
+		}
+		changed := low != d.batteryLow
+		d.batteryLow = low
+		d.mu.Unlock()
+		if changed {
+			d.poke()
+		}
+		time.Sleep(20 * time.Second)
+	}
+}
+
+func batteries() []string {
+	out, _ := filepath.Glob("/sys/class/power_supply/BAT*")
+	return out
+}
+
+func (d *daemon) poke() {
+	select {
+	case d.wake <- struct{}{}:
+	default:
 	}
 }
 
@@ -182,7 +280,7 @@ func keyboards() []string {
 func (d *daemon) load() {
 	d.cfg = light.DefaultConfig()
 	if data, err := os.ReadFile(d.statePath); err == nil {
-		var c light.Config
+		c := light.DefaultConfig() // settings added in later versions keep their defaults
 		if json.Unmarshal(data, &c) == nil {
 			if c, err := c.Clamp(); err == nil {
 				d.cfg = c
@@ -221,11 +319,16 @@ func (d *daemon) handle(conn net.Conn) {
 			d.cfg = c
 			d.mu.Unlock()
 			d.save(c)
-			select {
-			case d.wake <- struct{}{}:
-			default:
-			}
+			d.poke()
 		}
+	} else if req.Cmd == "flash" || req.Cmd == "notification" {
+		// "notification" comes from notify-watch and only counts when the alert is on; "flash" always
+		d.mu.Lock()
+		if req.Cmd == "flash" || d.cfg.Notify {
+			d.flashAt = time.Now()
+		}
+		d.mu.Unlock()
+		d.poke()
 	} else if req.Cmd != "status" {
 		resp = light.Response{Error: "unknown command " + strconv.Quote(req.Cmd)}
 	}
@@ -263,6 +366,8 @@ func runDaemon(socket, statePath, method, group string) error {
 	os.Chmod(socket, 0o660)
 
 	go d.watchKeyboards()
+	go d.watchCPU()
+	go d.watchBattery()
 	go d.run()
 	go func() {
 		sig := make(chan os.Signal, 1)

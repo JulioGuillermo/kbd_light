@@ -32,13 +32,19 @@ func (a *App) Set(c light.Config) (light.Response, error) {
 	return light.Set(c)
 }
 
+// Flash gives one notification flash, to try it.
+func (a *App) Flash() error {
+	_, err := light.Call(light.Request{Cmd: "flash"})
+	return err
+}
+
 func main() {
 	err := wails.Run(&options.App{
 		Title: "Keyboard light",
 		// A fixed size makes tiling window managers (Hyprland, sway) open it floating, like a dialog;
 		// Brasa centres floating windows
 		Width:            560,
-		Height:           660,
+		Height:           990,
 		DisableResize:    true,
 		BackgroundColour: &options.RGBA{R: 0, G: 4, B: 15, A: 255},
 		AssetServer:      &assetserver.Options{Assets: assets},

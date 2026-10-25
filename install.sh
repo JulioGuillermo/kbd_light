@@ -10,6 +10,7 @@ USER_GROUP=$(id -gn)
 BIN=/usr/bin
 DESKTOP=/usr/share/applications/kbdlight-ui.desktop        # named like the window's app id, so it gets the icon
 ICON=/usr/share/icons/hicolor/scalable/apps/kbdlight.svg
+NOTIFY_UNIT=/usr/lib/systemd/user/kbdlight-notify.service   # watches each user's notifications
 PANEL=~/.config/brasa/panel.conf      # Brasa's custom panel buttons
 PANEL_LINE="󰌌 | Keyboard light | setsid -f $BIN/kbdlight-ui"
 say() { printf '\e[1;31m▶\e[0m %s\n' "$*"; }
@@ -26,6 +27,9 @@ panel_reload() {  # rebuild Brasa's panel so the Custom menu shows the change (w
 }
 
 if [ "${1:-}" = --uninstall ]; then
+  systemctl --user disable --now kbdlight-notify 2>/dev/null || true
+  $SUDO systemctl --global disable kbdlight-notify 2>/dev/null || true
+  $SUDO rm -f "$NOTIFY_UNIT"
   $SUDO systemctl disable --now kbdlight 2>/dev/null || true
   $SUDO rm -f $BIN/kbdlight $BIN/kbdlight-ui /usr/local/bin/kbdlight /usr/local/bin/kbdlight-ui \
              /etc/systemd/system/kbdlight.service /etc/modules-load.d/kbdlight.conf
@@ -38,6 +42,7 @@ if [ "${1:-}" = --uninstall ]; then
 fi
 
 command -v go >/dev/null || { echo "Go is needed to build it (pacman -S go)"; exit 1; }
+command -v dbus-monitor >/dev/null || echo "Note: without dbus-monitor (package dbus) the notification flash cannot work"
 [ -d /sys/module/acpi_call ] || modinfo acpi_call >/dev/null 2>&1 ||
   { echo "The acpi_call kernel module is needed (Manjaro: pacman -S linux-acpi_call-meta)"; exit 1; }
 
@@ -69,6 +74,25 @@ UNIT
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now kbdlight
 $SUDO systemctl restart kbdlight
+
+# Notifications: a small user service in each session tells the daemon when one arrives (the daemon,
+# as root, cannot see the users' session buses). It only flashes while that alert is on.
+$SUDO tee "$NOTIFY_UNIT" >/dev/null <<UNIT
+[Unit]
+Description=kbdlight: flash the keyboard light on desktop notifications
+After=dbus.socket
+
+[Service]
+ExecStart=$BIN/kbdlight notify-watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNIT
+$SUDO systemctl --global enable kbdlight-notify.service >/dev/null 2>&1 || true
+systemctl --user daemon-reload 2>/dev/null && systemctl --user enable kbdlight-notify >/dev/null 2>&1 &&
+  systemctl --user restart kbdlight-notify || true
 
 # Menu entry and icon, for every user
 $SUDO install -Dm644 assets/kbdlight.svg "$ICON"

@@ -8,9 +8,19 @@
 //	kbdlight daemon [--socket PATH] [--state PATH] [--method ACPI] [--group NAME]   (root, systemd)
 //	kbdlight status [--json]
 //	kbdlight off
-//	kbdlight fixed LEVEL                                  0-255
+//	kbdlight fixed LEVEL                                0-255
 //	kbdlight breath [--min N] [--max N] [--period 3s]
-//	kbdlight reactive [--max N] [--hold 1s] [--fade 4s]
+//	kbdlight reactive [--max N] [--hold 1s] [--fade 4s]   lights up while you type
+//	kbdlight heartbeat [--min N] [--max N] [--bpm 60]
+//	kbdlight candle [--level N] [--flicker 0.35]
+//	kbdlight cpu [--min N] [--max N]                    follows the processor's load
+//	kbdlight custom [--min N] [--max N] [--period 3s]   your own curve (drawn in kbdlight-ui)
+//	kbdlight notify on|off                              flash on desktop notifications
+//	kbdlight battery-alert on|off [--level 20] [--every 10s]
+//	kbdlight flash                                      one flash, to try it
+//	kbdlight-ui                                         the window
+//	kbdlight daemon [--group NAME] ...                  as root (kbdlight.service)
+//	kbdlight notify-watch                               as your user (kbdlight-notify.service)
 //
 // The window (kbdlight-ui) is a separate program, so this one stays small.
 package main
@@ -88,6 +98,52 @@ func main() {
 			fs.Parse(args)
 			c.Mode, c.Hold, c.Fade = "reactive", hold.Seconds(), fade.Seconds()
 		})
+	case "heartbeat":
+		err = change(func(c *light.Config) {
+			fs := flag.NewFlagSet("heartbeat", flag.ExitOnError)
+			fs.IntVar(&c.Min, "min", c.Min, "between beats 0-255")
+			fs.IntVar(&c.Max, "max", c.Max, "the beat 0-255")
+			fs.Float64Var(&c.BPM, "bpm", c.BPM, "beats per minute")
+			fs.Parse(args)
+			c.Mode = "heartbeat"
+		})
+	case "candle":
+		err = change(func(c *light.Config) {
+			fs := flag.NewFlagSet("candle", flag.ExitOnError)
+			fs.IntVar(&c.Level, "level", c.Level, "the flame's brightness 0-255")
+			fs.Float64Var(&c.Flick, "flicker", c.Flick, "how much it moves, 0-1")
+			fs.Parse(args)
+			c.Mode = "candle"
+		})
+	case "cpu", "custom":
+		err = change(func(c *light.Config) {
+			fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+			fs.IntVar(&c.Min, "min", c.Min, "lowest 0-255")
+			fs.IntVar(&c.Max, "max", c.Max, "highest 0-255")
+			period := fs.Duration("period", seconds(c.Period), "custom: one full cycle")
+			fs.Parse(args)
+			c.Mode, c.Period = cmd, period.Seconds()
+		})
+	case "notify":
+		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+			usage()
+		}
+		err = change(func(c *light.Config) { c.Notify = args[0] == "on" })
+	case "battery-alert":
+		if len(args) < 1 || (args[0] != "on" && args[0] != "off") {
+			usage()
+		}
+		err = change(func(c *light.Config) {
+			fs := flag.NewFlagSet("battery-alert", flag.ExitOnError)
+			fs.IntVar(&c.BatteryLevel, "level", c.BatteryLevel, "percent at or below which it alerts")
+			every := fs.Duration("every", seconds(c.BatteryEvery), "time between pulses")
+			fs.Parse(args[1:])
+			c.BatteryAlert, c.BatteryEvery = args[0] == "on", every.Seconds()
+		})
+	case "flash":
+		_, err = light.Call(light.Request{Cmd: "flash"})
+	case "notify-watch":
+		err = notifyWatch()
 	default:
 		usage()
 	}
@@ -113,14 +169,21 @@ func change(edit func(*light.Config)) error {
 func seconds(s float64) time.Duration { return time.Duration(s * float64(time.Second)) }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `kbdlight: keyboard backlight with 256 levels, breathing and a reactive mode
-  kbdlight status [--json]
+	fmt.Fprint(os.Stderr, "kbdlight: keyboard backlight with 256 levels and effects\n"+`  kbdlight status [--json]
   kbdlight off
   kbdlight fixed LEVEL                                0-255
   kbdlight breath [--min N] [--max N] [--period 3s]
-  kbdlight reactive [--max N] [--hold 1s] [--fade 4s]
+  kbdlight reactive [--max N] [--hold 1s] [--fade 4s]   lights up while you type
+  kbdlight heartbeat [--min N] [--max N] [--bpm 60]
+  kbdlight candle [--level N] [--flicker 0.35]
+  kbdlight cpu [--min N] [--max N]                    follows the processor's load
+  kbdlight custom [--min N] [--max N] [--period 3s]   your own curve (drawn in kbdlight-ui)
+  kbdlight notify on|off                              flash on desktop notifications
+  kbdlight battery-alert on|off [--level 20] [--every 10s]
+  kbdlight flash                                      one flash, to try it
   kbdlight-ui                                         the window
   kbdlight daemon [--group NAME] ...                  as root (kbdlight.service)
+  kbdlight notify-watch                               as your user (kbdlight-notify.service)
 `)
 	os.Exit(2)
 }
