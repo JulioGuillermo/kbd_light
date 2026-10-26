@@ -23,6 +23,8 @@ import (
 
 const acpiCall = "/proc/acpi/call"
 
+const blinkPeriod = 0.5 // seconds, one charger blink on and off
+
 type daemon struct {
 	method    string // the firmware method taking the intensity as its last argument
 	statePath string
@@ -35,6 +37,7 @@ type daemon struct {
 	batteryLow bool       // at or below the alert level and not charging
 	lowSince   time.Time  // when the battery went low (the alert's pulses count from here)
 	flashAt    time.Time  // last notification flash
+	blinkAt    time.Time  // last charger plug or unplug
 	changed    *sync.Cond // signalled (on mu) when the configuration changes, for the watchers
 
 	wake chan struct{} // configuration changed
@@ -89,7 +92,7 @@ func (d *daemon) run() {
 		now := time.Now()
 		d.mu.Lock()
 		cfg, st := d.cfg, light.State{LastKey: d.lastKey, CPU: d.cpu}
-		low, lowSince, flashAt := d.batteryLow, d.lowSince, d.flashAt
+		low, lowSince, flashAt, blinkAt := d.batteryLow, d.lowSince, d.flashAt, d.blinkAt
 		d.mu.Unlock()
 		v, next := cfg.At(now, st)
 
@@ -104,6 +107,15 @@ func (d *daemon) run() {
 			} else {
 				next = time.Duration((cfg.BatteryEvery - t) * 1e9)
 			}
+		}
+		// Charger plugged in or out: three blinks, full and off, over a second and a half
+		if since := now.Sub(blinkAt).Seconds(); since < 3*blinkPeriod {
+			v = 0
+			if math.Mod(since, blinkPeriod) < blinkPeriod/2 {
+				v = 255
+			}
+			untilEdge := blinkPeriod/2 - math.Mod(since, blinkPeriod/2)
+			next = time.Duration(untilEdge * 1e9)
 		}
 		// A notification: a quick double pulse to full, then back to whatever the mode shows
 		if since := now.Sub(flashAt).Seconds(); since < 0.6 {
@@ -181,40 +193,119 @@ func (d *daemon) watchCPU() {
 	}
 }
 
-// watchBattery checks every 20 s whether the battery is at or below the alert level and discharging,
-// and sleeps while the alert is off.
-func (d *daemon) watchBattery() {
+// watchPower checks every 20 s whether the battery is at or below the alert level and discharging,
+// and at once when the charger is plugged in or out. It sleeps while both power alerts are off.
+func (d *daemon) watchPower() {
+	powerChanged := make(chan struct{}, 1)
+	go watchPowerEvents(powerChanged)
 	for {
-		d.waitFor(func(c light.Config) bool { return c.BatteryAlert })
-		low := false
-		d.mu.Lock()
-		level := d.cfg.BatteryLevel
-		d.mu.Unlock()
-		for _, bat := range batteries() {
-			capText, _ := os.ReadFile(bat + "/capacity")
-			status, _ := os.ReadFile(bat + "/status")
-			capacity, err := strconv.Atoi(strings.TrimSpace(string(capText)))
-			if err == nil && capacity <= level && strings.TrimSpace(string(status)) == "Discharging" {
-				low = true
+		d.waitFor(watchesPower)
+		charger := chargerOnline()
+		d.checkBattery(charger)
+		for watchesPower(d.config()) {
+			select {
+			case <-time.After(20 * time.Second):
+			case <-powerChanged:
 			}
+			chargerNow := chargerOnline()
+			if chargerNow != charger && d.config().ChargerBlink {
+				d.blink()
+			}
+			charger = chargerNow
+			d.checkBattery(charger)
 		}
-		d.mu.Lock()
-		if low && !d.batteryLow {
-			d.lowSince = time.Now()
-		}
-		changed := low != d.batteryLow
-		d.batteryLow = low
-		d.mu.Unlock()
-		if changed {
-			d.poke()
-		}
-		time.Sleep(20 * time.Second)
 	}
 }
 
-func batteries() []string {
-	out, _ := filepath.Glob("/sys/class/power_supply/BAT*")
-	return out
+func watchesPower(c light.Config) bool { return c.BatteryAlert || c.ChargerBlink }
+
+func (d *daemon) config() light.Config {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cfg
+}
+
+func (d *daemon) blink() {
+	d.mu.Lock()
+	d.blinkAt = time.Now()
+	d.mu.Unlock()
+	d.poke()
+}
+
+func (d *daemon) checkBattery(charger bool) {
+	cfg := d.config()
+	low := cfg.BatteryAlert && !charger && batteryBelow(cfg.BatteryLevel)
+	d.mu.Lock()
+	if low && !d.batteryLow {
+		d.lowSince = time.Now()
+	}
+	changed := low != d.batteryLow
+	d.batteryLow = low
+	d.mu.Unlock()
+	if changed {
+		d.poke()
+	}
+}
+
+func batteryBelow(level int) bool {
+	batteries, _ := filepath.Glob("/sys/class/power_supply/BAT*")
+	for _, bat := range batteries {
+		capacity, err := strconv.Atoi(readSysfs(bat + "/capacity"))
+		if err == nil && capacity <= level && readSysfs(bat+"/status") == "Discharging" {
+			return true
+		}
+	}
+	return false
+}
+
+func chargerOnline() bool {
+	supplies, _ := filepath.Glob("/sys/class/power_supply/*")
+	for _, supply := range supplies {
+		if readSysfs(supply+"/type") == "Mains" && readSysfs(supply+"/online") == "1" {
+			return true
+		}
+	}
+	return false
+}
+
+func readSysfs(path string) string {
+	data, _ := os.ReadFile(path)
+	return strings.TrimSpace(string(data))
+}
+
+// watchPowerEvents signals every kernel event of a power supply (charger plugged or unplugged,
+// battery status changed). The battery may still read "Discharging" for a moment after the
+// charger event, so it signals again a second later.
+func watchPowerEvents(changed chan<- struct{}) {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_DGRAM, syscall.NETLINK_KOBJECT_UEVENT)
+	if err != nil {
+		log.Printf("power events: %v", err)
+		return
+	}
+	defer syscall.Close(fd)
+	const kernelEvents = 1
+	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: kernelEvents}); err != nil {
+		log.Printf("power events: %v", err)
+		return
+	}
+	notify := func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
+	buf := make([]byte, 8192)
+	for {
+		n, err := syscall.Read(fd, buf)
+		if err != nil {
+			log.Printf("power events: %v", err)
+			return
+		}
+		if strings.Contains(string(buf[:n]), "\x00SUBSYSTEM=power_supply\x00") {
+			notify()
+			time.AfterFunc(time.Second, notify)
+		}
+	}
 }
 
 func (d *daemon) poke() {
@@ -387,7 +478,7 @@ func runDaemon(socket, statePath, method, group string) error {
 
 	go d.watchKeyboards()
 	go d.watchCPU()
-	go d.watchBattery()
+	go d.watchPower()
 	go d.run()
 	go func() {
 		sig := make(chan os.Signal, 1)

@@ -17,6 +17,7 @@ And two alerts that work with any mode:
 - **Notifications**: a quick double pulse when a desktop notification arrives, then back to the mode.
 - **Low battery**: at or below the level you set, and discharging, the light goes off to save power and
   gives a strong double pulse every few seconds (10 by default) until you plug it in.
+- **Charger**: three blinks when you plug the charger in or out.
 
 ## Pieces
 
@@ -37,6 +38,7 @@ kbdlight cpu --min 10 --max 255
 kbdlight custom --min 0 --max 220 --period 4s     # the curve itself is drawn in the window
 kbdlight notify on
 kbdlight battery-alert on --level 20 --every 10s
+kbdlight charger-blink on
 kbdlight flash
 kbdlight fps 15                                   # animation updates per second, 5-60
 kbdlight-ui
@@ -51,7 +53,7 @@ The firmware's DSDT turns the four levels into a duty cycle (`PWKB = 00 55 AA FF
 embedded controller with `\_SB.PC00.LPCB.EC0.ST9E(0x1F, 0xFF, value)`. kbdlight calls that method
 directly through `/proc/acpi/call` (the `acpi_call` module): while animating as many times a second
 as you set (15 by default, 5-60; each update costs about 2 ms of processor time), otherwise only on
-changes and every 30 s to re-assert it. The processor load is only read in the CPU mode, the battery only with its alert on. Another model may use another method: `kbdlight daemon --method '...'`.
+changes and every 30 s to re-assert it. The processor load is only read in the CPU mode, the battery and charger only with their alerts on. Another model may use another method: `kbdlight daemon --method '...'`.
 
 The notification flash comes from `kbdlight notify-watch`, a small user service in each session
 (`kbdlight-notify.service`) that watches the session bus for the standard

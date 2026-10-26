@@ -29,6 +29,7 @@ type Config struct {
 	BatteryAlert bool    `json:"battery_alert"` // low battery: light off, a strong double pulse every BatteryEvery
 	BatteryLevel int     `json:"battery_level"` // percent at or below which the alert starts
 	BatteryEvery float64 `json:"battery_every"`
+	ChargerBlink bool    `json:"charger_blink"` // three blinks when the charger is plugged in or out
 }
 
 // Node is a point of a custom curve with its two Bézier handles (absolute coordinates, 0-1).
@@ -227,6 +228,9 @@ func (c Config) Describe() string {
 	}
 	if c.BatteryAlert {
 		d += fmt.Sprintf("; low battery alert at %d%% every %.0fs", c.BatteryLevel, c.BatteryEvery)
+	}
+	if c.ChargerBlink {
+		d += "; blinks when the charger is plugged in or out"
 	}
 	return d
 }

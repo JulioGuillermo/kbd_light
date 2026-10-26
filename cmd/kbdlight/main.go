@@ -17,6 +17,7 @@
 //	kbdlight custom [--min N] [--max N] [--period 3s]   your own curve (drawn in kbdlight-ui)
 //	kbdlight notify on|off                              flash on desktop notifications
 //	kbdlight battery-alert on|off [--level 20] [--every 10s]
+//	kbdlight charger-blink on|off                       three blinks on plugging or unplugging the charger
 //	kbdlight flash                                      one flash, to try it
 //	kbdlight fps N                                      animation updates per second, 5-60 (15)
 //	kbdlight-ui                                         the window
@@ -141,6 +142,11 @@ func main() {
 			fs.Parse(args[1:])
 			c.BatteryAlert, c.BatteryEvery = args[0] == "on", every.Seconds()
 		})
+	case "charger-blink":
+		if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+			usage()
+		}
+		err = change(func(c *light.Config) { c.ChargerBlink = args[0] == "on" })
 	case "fps":
 		if len(args) != 1 {
 			usage()
@@ -190,6 +196,7 @@ func usage() {
   kbdlight custom [--min N] [--max N] [--period 3s]   your own curve (drawn in kbdlight-ui)
   kbdlight notify on|off                              flash on desktop notifications
   kbdlight battery-alert on|off [--level 20] [--every 10s]
+  kbdlight charger-blink on|off                       three blinks on plugging or unplugging the charger
   kbdlight flash                                      one flash, to try it
   kbdlight fps N                                      animation updates per second, 5-60 (15)
   kbdlight-ui                                         the window

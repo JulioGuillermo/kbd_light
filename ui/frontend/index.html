@@ -112,6 +112,10 @@
       <label class="toggle"><input type="checkbox" id="battery"><span></span></label>
     </div>
     <div class="sublist" id="battery-params"></div>
+    <div class="switch">
+      <span>Blink 3 times when the charger is plugged in or out</span>
+      <label class="toggle"><input type="checkbox" id="charger"><span></span></label>
+    </div>
     <div id="general-params"></div>
   </div>
 
@@ -169,6 +173,7 @@
     if (p.editor) drawCurve();
     document.getElementById('notify').checked = cfg.notify;
     document.getElementById('battery').checked = cfg.battery_alert;
+    document.getElementById('charger').checked = cfg.charger_blink;
     document.getElementById('battery-params').innerHTML = sliders(BATTERY);
     document.getElementById('general-params').innerHTML = sliders(GENERAL);
     for (const r of document.querySelectorAll('#battery-params input')) r.disabled = !cfg.battery_alert;
@@ -317,6 +322,7 @@
   });
   document.getElementById('notify').addEventListener('change', e => { cfg.notify = e.target.checked; send(); });
   document.getElementById('battery').addEventListener('change', e => { cfg.battery_alert = e.target.checked; render(); send(); });
+  document.getElementById('charger').addEventListener('change', e => { cfg.charger_blink = e.target.checked; send(); });
   document.getElementById('testflash').addEventListener('click', () => App().Flash().catch(fail));
 
   // Live preview: what the keyboard shows right now (also follows changes made elsewhere)
